@@ -23,10 +23,12 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/sigstore/sigstore/pkg/pqcrypto"
 )
 
 func verifyRSAKeyPEMs(t *testing.T, privPEM, pubPEM []byte, expectedKeyLengthBits int, testPassFunc PassFunc) {
@@ -293,4 +295,219 @@ func TestUnmarshalPEMToPrivateKey(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "unknown private key PEM file type") {
 		t.Fatalf("expected error unmarshalling invalid PEM block, got: %v", err)
 	}
+}
+
+func TestUnmarshalDERToPrivateKey(t *testing.T) {
+	t.Run("Classical keys", func(t *testing.T) {
+		// Test RSA key
+		rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatalf("rsa.GenerateKey failed: %v", err)
+		}
+
+		derBytes, err := x509.MarshalPKCS8PrivateKey(rsaKey)
+		if err != nil {
+			t.Fatalf("x509.MarshalPKCS8PrivateKey failed: %v", err)
+		}
+
+		key, err := UnmarshalDERToPrivateKey(derBytes)
+		if err != nil {
+			t.Fatalf("UnmarshalDERToPrivateKey failed: %v", err)
+		}
+
+		rsaResult, ok := key.(*rsa.PrivateKey)
+		if !ok {
+			t.Fatalf("expected *rsa.PrivateKey, got %T", key)
+		}
+
+		if !rsaKey.Equal(rsaResult) {
+			t.Error("RSA keys are not equal")
+		}
+
+		// Test ECDSA key
+		ecdsaKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatalf("ecdsa.GenerateKey failed: %v", err)
+		}
+
+		derBytes, err = x509.MarshalPKCS8PrivateKey(ecdsaKey)
+		if err != nil {
+			t.Fatalf("x509.MarshalPKCS8PrivateKey failed: %v", err)
+		}
+
+		key, err = UnmarshalDERToPrivateKey(derBytes)
+		if err != nil {
+			t.Fatalf("UnmarshalDERToPrivateKey failed: %v", err)
+		}
+
+		ecdsaResult, ok := key.(*ecdsa.PrivateKey)
+		if !ok {
+			t.Fatalf("expected *ecdsa.PrivateKey, got %T", key)
+		}
+
+		if !ecdsaKey.Equal(ecdsaResult) {
+			t.Error("ECDSA keys are not equal")
+		}
+
+		// Test Ed25519 key
+		_, ed25519Key, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatalf("ed25519.GenerateKey failed: %v", err)
+		}
+
+		derBytes, err = x509.MarshalPKCS8PrivateKey(ed25519Key)
+		if err != nil {
+			t.Fatalf("x509.MarshalPKCS8PrivateKey failed: %v", err)
+		}
+
+		key, err = UnmarshalDERToPrivateKey(derBytes)
+		if err != nil {
+			t.Fatalf("UnmarshalDERToPrivateKey failed: %v", err)
+		}
+
+		ed25519Result, ok := key.(ed25519.PrivateKey)
+		if !ok {
+			t.Fatalf("expected ed25519.PrivateKey, got %T", key)
+		}
+
+		if !ed25519Key.Equal(ed25519Result) {
+			t.Error("Ed25519 keys are not equal")
+		}
+	})
+
+	t.Run("Post-quantum keys", func(t *testing.T) {
+		algorithms := []string{pqcrypto.MLDSA65Algorithm, pqcrypto.MLDSA87Algorithm}
+
+		for _, algorithm := range algorithms {
+			t.Run(algorithm, func(t *testing.T) {
+				pqKey, err := pqcrypto.GeneratePQKey(algorithm)
+				if err != nil {
+					if errors.Is(err, pqcrypto.ErrMissingPostQuantumBuildTag) {
+						t.Skip("Post-quantum build tags should be defined")
+					}
+					t.Fatalf("pqcrypto.GeneratePQKey failed: %v", err)
+				}
+
+				derBytes, err := MarshalPrivateKeyToDER(pqKey)
+				if err != nil {
+					t.Fatalf("MarshalPrivateKeyToDER failed: %v", err)
+				}
+
+				key, err := UnmarshalDERToPrivateKey(derBytes)
+				if err != nil {
+					t.Fatalf("UnmarshalDERToPrivateKey failed: %v", err)
+				}
+
+				pqResult, ok := key.(*pqcrypto.PQPrivateKey)
+				if !ok {
+					t.Fatalf("expected *pqcrypto.PQPrivateKey, got %T", key)
+				}
+
+				if !pqKey.Equal(pqResult) {
+					t.Error("PQ keys are not equal")
+				}
+
+				if pqResult.Algorithm != algorithm {
+					t.Errorf("expected algorithm %s, got %s", algorithm, pqResult.Algorithm)
+				}
+
+				if !pqKey.OID.Equal(pqResult.OID) {
+					t.Error("OIDs are not equal")
+				}
+			})
+		}
+	})
+
+	t.Run("Error cases", func(t *testing.T) {
+		_, err := UnmarshalDERToPrivateKey([]byte{})
+		if err == nil || !strings.Contains(err.Error(), "empty DER bytes") {
+			t.Errorf("expected error for empty DER bytes, got: %v", err)
+		}
+
+		_, err = UnmarshalDERToPrivateKey([]byte{0x00, 0x01, 0x02})
+		if err == nil {
+			t.Error("expected error for invalid DER bytes")
+		}
+	})
+}
+
+func TestMarshalPrivateKeyToDERWithPQ(t *testing.T) {
+	t.Run("Post-quantum keys via MarshalPrivateKeyToDER", func(t *testing.T) {
+		algorithms := []string{pqcrypto.MLDSA65Algorithm, pqcrypto.MLDSA87Algorithm}
+
+		for _, algorithm := range algorithms {
+			t.Run(algorithm, func(t *testing.T) {
+				pqKey, err := pqcrypto.GeneratePQKey(algorithm)
+				if err != nil {
+					if errors.Is(err, pqcrypto.ErrMissingPostQuantumBuildTag) {
+						t.Skip("Post-quantum build tags should be defined")
+					}
+					t.Fatalf("pqcrypto.GeneratePQKey failed: %v", err)
+				}
+
+				derBytes, err := MarshalPrivateKeyToDER(pqKey)
+				if err != nil {
+					t.Fatalf("MarshalPrivateKeyToDER failed: %v", err)
+				}
+
+				if len(derBytes) == 0 {
+					t.Error("expected non-empty DER bytes")
+				}
+
+				key, err := UnmarshalDERToPrivateKey(derBytes)
+				if err != nil {
+					t.Fatalf("UnmarshalDERToPrivateKey failed: %v", err)
+				}
+
+				pqResult, ok := key.(*pqcrypto.PQPrivateKey)
+				if !ok {
+					t.Fatalf("expected *pqcrypto.PQPrivateKey, got %T", key)
+				}
+
+				if !pqKey.Equal(pqResult) {
+					t.Error("PQ keys are not equal after round-trip")
+				}
+			})
+		}
+	})
+}
+
+func TestMarshalPublicKeyToDERWithPQ(t *testing.T) {
+	t.Run("Post-quantum public keys", func(t *testing.T) {
+		algorithms := []string{pqcrypto.MLDSA65Algorithm, pqcrypto.MLDSA87Algorithm}
+
+		for _, algorithm := range algorithms {
+			t.Run(algorithm, func(t *testing.T) {
+				pqKey, err := pqcrypto.GeneratePQKey(algorithm)
+				if err != nil {
+					if errors.Is(err, pqcrypto.ErrMissingPostQuantumBuildTag) {
+						t.Skip("Post-quantum build tags should be defined")
+					}
+					t.Fatalf("pqcrypto.GeneratePQKey failed: %v", err)
+				}
+
+				derBytes, err := MarshalPublicKeyToDER(pqKey.PublicKey)
+				if err != nil {
+					t.Fatalf("MarshalPublicKeyToDER failed: %v", err)
+				}
+
+				if len(derBytes) == 0 {
+					t.Error("expected non-empty DER bytes")
+				}
+
+				if !cmp.Equal(derBytes, pqKey.PublicKey.Raw) {
+					t.Error("DER bytes don't match Raw field")
+				}
+
+				extractedOID, err := pqcrypto.ExtractPKIXPublicKeyAlgorithmOID(derBytes)
+				if err != nil {
+					t.Fatalf("pqcrypto.ExtractPKIXPublicKeyAlgorithmOID failed: %v", err)
+				}
+
+				if !pqKey.OID.Equal(extractedOID) {
+					t.Errorf("expected OID %s, got %s", pqKey.OID, extractedOID)
+				}
+			})
+		}
+	})
 }

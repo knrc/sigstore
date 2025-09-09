@@ -25,6 +25,7 @@ import (
 	"fmt"
 
 	v1 "github.com/sigstore/protobuf-specs/gen/pb-go/common/v1"
+	"github.com/sigstore/sigstore/pkg/pqcrypto"
 )
 
 // PublicKeyType represents the public key algorithm for a given signature algorithm.
@@ -37,6 +38,8 @@ const (
 	ECDSA
 	// ED25519 public key
 	ED25519
+	// PQ post-quantum public key
+	PQ
 )
 
 // RSAKeySize represents the size of an RSA public key in bits.
@@ -115,6 +118,23 @@ func (a AlgorithmDetails) GetECDSACurve() (*elliptic.Curve, error) {
 	return &ecdsaCurve, nil
 }
 
+// getPQAlgorithm returns the post-quantum algorithm name for PQ key types
+func (a AlgorithmDetails) getPQAlgorithm() string {
+	if a.keyType != PQ {
+		return ""
+	}
+
+	// Map the known algorithm to its string representation
+	switch a.knownAlgorithm {
+	case v1.PublicKeyDetails_ML_DSA_65:
+		return pqcrypto.MLDSA65Algorithm
+	case v1.PublicKeyDetails_ML_DSA_87:
+		return pqcrypto.MLDSA87Algorithm
+	default:
+		return ""
+	}
+}
+
 func (a AlgorithmDetails) checkKey(pubKey crypto.PublicKey) (bool, error) {
 	switch a.keyType {
 	case RSA:
@@ -140,6 +160,13 @@ func (a AlgorithmDetails) checkKey(pubKey crypto.PublicKey) (bool, error) {
 	case ED25519:
 		_, ok := pubKey.(ed25519.PublicKey)
 		return ok, nil
+	case PQ:
+		pqKey, ok := pubKey.(*pqcrypto.PQPublicKey)
+		if !ok {
+			return false, nil
+		}
+		expectedAlg := a.getPQAlgorithm()
+		return pqKey.Algorithm == expectedAlg, nil
 	}
 	return false, fmt.Errorf("unrecognized key type: %T", a.keyType)
 }
@@ -165,6 +192,9 @@ var supportedAlgorithms = []AlgorithmDetails{
 	{v1.PublicKeyDetails_PKIX_ECDSA_P521_SHA_256, ECDSA, crypto.SHA256, v1.HashAlgorithm_SHA2_256, elliptic.P521(), "ecdsa-sha2-256-nistp521"}, //nolint:staticcheck
 	{v1.PublicKeyDetails_PKIX_ED25519, ED25519, crypto.Hash(0), v1.HashAlgorithm_HASH_ALGORITHM_UNSPECIFIED, nil, "ed25519"},
 	{v1.PublicKeyDetails_PKIX_ED25519_PH, ED25519, crypto.SHA512, v1.HashAlgorithm_SHA2_512, nil, "ed25519-ph"},
+	// Post-quantum algorithms (ML-DSA from NIST FIPS 204)
+	{v1.PublicKeyDetails_ML_DSA_65, PQ, crypto.Hash(0), v1.HashAlgorithm_HASH_ALGORITHM_UNSPECIFIED, nil, "ml-dsa-65"},
+	{v1.PublicKeyDetails_ML_DSA_87, PQ, crypto.Hash(0), v1.HashAlgorithm_HASH_ALGORITHM_UNSPECIFIED, nil, "ml-dsa-87"},
 }
 
 // AlgorithmRegistryConfig represents a set of permitted algorithms for a given Sigstore service or component.
@@ -293,6 +323,15 @@ func GetDefaultPublicKeyDetails(publicKey crypto.PublicKey, opts ...LoadOption) 
 			return v1.PublicKeyDetails_PKIX_ED25519_PH, nil
 		}
 		return v1.PublicKeyDetails_PKIX_ED25519, nil
+	case *pqcrypto.PQPublicKey:
+		switch pk.Algorithm {
+		case pqcrypto.MLDSA65Algorithm:
+			return v1.PublicKeyDetails_ML_DSA_65, nil
+		case pqcrypto.MLDSA87Algorithm:
+			return v1.PublicKeyDetails_ML_DSA_87, nil
+		default:
+			return v1.PublicKeyDetails_PUBLIC_KEY_DETAILS_UNSPECIFIED, fmt.Errorf("unsupported post-quantum algorithm: %s", pk.Algorithm)
+		}
 	}
 	return v1.PublicKeyDetails_PUBLIC_KEY_DETAILS_UNSPECIFIED, errors.New("unsupported public key type")
 }

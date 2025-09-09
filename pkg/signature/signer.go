@@ -30,6 +30,7 @@ import (
 	_ "crypto/sha512"
 
 	"github.com/sigstore/sigstore/pkg/cryptoutils"
+	"github.com/sigstore/sigstore/pkg/pqcrypto"
 	"github.com/sigstore/sigstore/pkg/signature/options"
 
 	// these ensure we have the implementations loaded
@@ -88,8 +89,13 @@ func LoadSignerWithOpts(privateKey crypto.PrivateKey, opts ...LoadOption) (Signe
 			return LoadED25519phSigner(pk)
 		}
 		return LoadED25519Signer(pk)
+	case *pqcrypto.PQPrivateKey:
+		if isPQPrivateKeySupported(pk) {
+			return LoadPQSignerVerifier(pk.PublicKey, pk)
+		}
+		return nil, pqcrypto.ErrMissingPostQuantumBuildTag
 	}
-	return nil, errors.New("unsupported public key type")
+	return nil, errors.New("unsupported private key type")
 }
 
 // LoadSignerFromPEMFile returns a signature.Signer based on the algorithm of the private key

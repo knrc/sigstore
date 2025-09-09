@@ -27,6 +27,7 @@ import (
 	"fmt"
 
 	"github.com/secure-systems-lab/go-securesystemslib/encrypted"
+	"github.com/sigstore/sigstore/pkg/pqcrypto"
 )
 
 const (
@@ -109,6 +110,9 @@ func UnmarshalPEMToPrivateKey(pemBytes []byte, pf PassFunc) (crypto.PrivateKey, 
 	}
 	switch derBlock.Type {
 	case string(PrivateKeyPEMType):
+		if pqKey, err := pqcrypto.ParsePKCS8PrivateKey(derBlock.Bytes); err == nil {
+			return pqKey, nil
+		}
 		return x509.ParsePKCS8PrivateKey(derBlock.Bytes)
 	case string(PKCS1PrivateKeyPEMType):
 		return x509.ParsePKCS1PrivateKey(derBlock.Bytes)
@@ -129,9 +133,26 @@ func UnmarshalPEMToPrivateKey(pemBytes []byte, pf PassFunc) (crypto.PrivateKey, 
 			}
 		}
 
+		if pqKey, err := pqcrypto.ParsePKCS8PrivateKey(derBytes); err == nil {
+			return pqKey, nil
+		}
 		return x509.ParsePKCS8PrivateKey(derBytes)
 	}
 	return nil, fmt.Errorf("unknown private key PEM file type: %v", derBlock.Type)
+}
+
+// UnmarshalDERToPrivateKey parses DER-encoded private key bytes and returns a crypto.PrivateKey.
+// It handles both classical keys (RSA, ECDSA, Ed25519) and post-quantum keys.
+func UnmarshalDERToPrivateKey(derBytes []byte) (crypto.PrivateKey, error) {
+	if len(derBytes) == 0 {
+		return nil, errors.New("empty DER bytes")
+	}
+
+	if pqKey, err := pqcrypto.ParsePKCS8PrivateKey(derBytes); err == nil {
+		return pqKey, nil
+	}
+
+	return x509.ParsePKCS8PrivateKey(derBytes)
 }
 
 // MarshalPrivateKeyToDER converts a crypto.PrivateKey into a PKCS8 ASN.1 DER byte slice
@@ -139,6 +160,11 @@ func MarshalPrivateKeyToDER(priv crypto.PrivateKey) ([]byte, error) {
 	if priv == nil {
 		return nil, errors.New("empty key")
 	}
+
+	if pqKey, ok := priv.(*pqcrypto.PQPrivateKey); ok {
+		return pqcrypto.MarshalPKCS8PrivateKey(pqKey)
+	}
+
 	return x509.MarshalPKCS8PrivateKey(priv)
 }
 

@@ -29,6 +29,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/letsencrypt/boulder/goodkey"
+	"github.com/sigstore/sigstore/pkg/pqcrypto"
 )
 
 func verifyPublicKeyPEMRoundtrip(t *testing.T, pub crypto.PublicKey) {
@@ -320,5 +321,84 @@ func TestUnmarshalPEMToPublicKey(t *testing.T) {
 	_, err = UnmarshalPEMToPublicKey(invalidPEMBlock)
 	if err == nil || !strings.Contains(err.Error(), "unknown Public key PEM file type") {
 		t.Fatalf("expected error unmarshalling invalid PEM block, got: %v", err)
+	}
+}
+
+func TestValidatePQKey(t *testing.T) {
+	tests := []struct {
+		name        string
+		key         *pqcrypto.PQPublicKey
+		expectError bool
+		errorMsg    string
+	}{
+		{
+			name: "valid ML-DSA-65 key",
+			key: &pqcrypto.PQPublicKey{
+				Algorithm: pqcrypto.MLDSA65Algorithm,
+				KeyData:   make([]byte, pqcrypto.MLDSA65PublicKeySize),
+			},
+			expectError: false,
+		},
+		{
+			name: "valid ML-DSA-87 key",
+			key: &pqcrypto.PQPublicKey{
+				Algorithm: pqcrypto.MLDSA87Algorithm,
+				KeyData:   make([]byte, pqcrypto.MLDSA87PublicKeySize),
+			},
+			expectError: false,
+		},
+		{
+			name: "unsupported algorithm",
+			key: &pqcrypto.PQPublicKey{
+				Algorithm: "Unsupported-Algorithm",
+				KeyData:   make([]byte, 64),
+			},
+			expectError: true,
+			errorMsg:    "unsupported post-quantum algorithm",
+		},
+		{
+			name: "empty key data",
+			key: &pqcrypto.PQPublicKey{
+				Algorithm: pqcrypto.MLDSA65Algorithm,
+				KeyData:   []byte{},
+			},
+			expectError: true,
+			errorMsg:    "post-quantum key has empty key data",
+		},
+		{
+			name: "ML-DSA-65 key too short",
+			key: &pqcrypto.PQPublicKey{
+				Algorithm: pqcrypto.MLDSA65Algorithm,
+				KeyData:   make([]byte, 16),
+			},
+			expectError: true,
+			errorMsg:    "ML-DSA-65 key data size is invalid",
+		},
+		{
+			name: "ML-DSA-87 key too short",
+			key: &pqcrypto.PQPublicKey{
+				Algorithm: pqcrypto.MLDSA87Algorithm,
+				KeyData:   make([]byte, 16),
+			},
+			expectError: true,
+			errorMsg:    "ML-DSA-87 key data size is invalid",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePQKey(tt.key)
+			if tt.expectError {
+				if err == nil {
+					t.Error("Expected error, got nil")
+				} else if !strings.Contains(err.Error(), tt.errorMsg) {
+					t.Errorf("Expected error containing '%s', got '%s'", tt.errorMsg, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error: %v", err)
+				}
+			}
+		})
 	}
 }

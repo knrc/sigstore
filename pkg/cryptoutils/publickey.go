@@ -31,6 +31,7 @@ import (
 	"fmt"
 
 	"github.com/letsencrypt/boulder/goodkey"
+	"github.com/sigstore/sigstore/pkg/pqcrypto"
 )
 
 const (
@@ -55,6 +56,11 @@ func UnmarshalPEMToPublicKey(pemBytes []byte) (crypto.PublicKey, error) {
 	}
 	switch derBytes.Type {
 	case string(PublicKeyPEMType):
+		if oid, err := pqcrypto.ExtractPKIXPublicKeyAlgorithmOID(derBytes.Bytes); err == nil {
+			if pqcrypto.IsPQAlgorithmOID(oid) {
+				return pqcrypto.ParsePKIXPublicKey(derBytes.Bytes)
+			}
+		}
 		return x509.ParsePKIXPublicKey(derBytes.Bytes)
 	case string(PKCS1PublicKeyPEMType):
 		return x509.ParsePKCS1PublicKey(derBytes.Bytes)
@@ -64,11 +70,32 @@ func UnmarshalPEMToPublicKey(pemBytes []byte) (crypto.PublicKey, error) {
 	}
 }
 
+// UnmarshalDERToPublicKey parses DER-encoded public key bytes and returns a crypto.PublicKey.
+// It handles both classical keys (RSA, ECDSA, Ed25519) and post-quantum keys.
+func UnmarshalDERToPublicKey(derBytes []byte) (crypto.PublicKey, error) {
+	if len(derBytes) == 0 {
+		return nil, errors.New("empty DER bytes")
+	}
+
+	if oid, err := pqcrypto.ExtractPKIXPublicKeyAlgorithmOID(derBytes); err == nil {
+		if pqcrypto.IsPQAlgorithmOID(oid) {
+			return pqcrypto.ParsePKIXPublicKey(derBytes)
+		}
+	}
+
+	return x509.ParsePKIXPublicKey(derBytes)
+}
+
 // MarshalPublicKeyToDER converts a crypto.PublicKey into a PKIX, ASN.1 DER byte slice
 func MarshalPublicKeyToDER(pub crypto.PublicKey) ([]byte, error) {
 	if pub == nil {
 		return nil, errors.New("empty key")
 	}
+
+	if pqKey, ok := pub.(*pqcrypto.PQPublicKey); ok {
+		return pqcrypto.MarshalPKIXPublicKey(pqKey)
+	}
+
 	return x509.MarshalPKIXPublicKey(pub)
 }
 
@@ -85,7 +112,7 @@ func MarshalPublicKeyToPEM(pub crypto.PublicKey) ([]byte, error) {
 // subjectPublicKey (excluding the tag, length, and number of unused bits).
 // https://tools.ietf.org/html/rfc5280#section-4.2.1.2
 func SKID(pub crypto.PublicKey) ([]byte, error) {
-	derPubBytes, err := x509.MarshalPKIXPublicKey(pub)
+	derPubBytes, err := MarshalPublicKeyToDER(pub)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +124,7 @@ func SKID(pub crypto.PublicKey) ([]byte, error) {
 	return skid[:], nil
 }
 
-// EqualKeys compares two public keys. Supports RSA, ECDSA and ED25519.
+// EqualKeys compares two public keys. Supports RSA, ECDSA, ED25519, and post-quantum keys.
 // If not equal, the error message contains hex-encoded SHA1 hashes of the DER-encoded keys
 func EqualKeys(first, second crypto.PublicKey) error {
 	switch pub := first.(type) {
@@ -112,6 +139,10 @@ func EqualKeys(first, second crypto.PublicKey) error {
 	case ed25519.PublicKey:
 		if !pub.Equal(second) {
 			return errors.New(genErrMsg(first, second, "ed25519"))
+		}
+	case *pqcrypto.PQPublicKey:
+		if !pub.Equal(second) {
+			return errors.New(genErrMsg(first, second, "post-quantum"))
 		}
 	default:
 		return errors.New("unsupported key type")
@@ -134,7 +165,7 @@ func genErrMsg(first, second crypto.PublicKey, keyType string) string {
 	return fmt.Sprintf("%s (%s, %s)", msg, hex.EncodeToString(firstSKID), hex.EncodeToString(secondSKID))
 }
 
-// ValidatePubKey validates the parameters of an RSA, ECDSA, or ED25519 public key.
+// ValidatePubKey validates the parameters of an RSA, ECDSA, ED25519, or post-quantum public key.
 func ValidatePubKey(pub crypto.PublicKey) error {
 	// goodkey policy enforces:
 	// * RSA
@@ -176,11 +207,40 @@ func ValidatePubKey(pub crypto.PublicKey) error {
 		return p.GoodKey(context.Background(), pub)
 	case ed25519.PublicKey:
 		return validateEd25519Key(pk)
+	case *pqcrypto.PQPublicKey:
+		return validatePQKey(pk)
 	}
 	return errors.New("unsupported public key type")
 }
 
 // No validations currently, ED25519 supports only one key size.
 func validateEd25519Key(_ ed25519.PublicKey) error {
+	return nil
+}
+
+// validatePQKey validates post-quantum keys
+func validatePQKey(pk *pqcrypto.PQPublicKey) error {
+	switch pk.Algorithm {
+	case pqcrypto.MLDSA65Algorithm, pqcrypto.MLDSA87Algorithm:
+		break
+	default:
+		return fmt.Errorf("unsupported post-quantum algorithm: %s", pk.Algorithm)
+	}
+
+	if len(pk.KeyData) == 0 {
+		return errors.New("post-quantum key has empty key data")
+	}
+
+	switch pk.Algorithm {
+	case pqcrypto.MLDSA65Algorithm:
+		if len(pk.KeyData) != pqcrypto.MLDSA65PublicKeySize {
+			return fmt.Errorf("ML-DSA-65 key data size is invalid: got %d bytes, expected %d", len(pk.KeyData), pqcrypto.MLDSA65PublicKeySize)
+		}
+	case pqcrypto.MLDSA87Algorithm:
+		if len(pk.KeyData) != pqcrypto.MLDSA87PublicKeySize {
+			return fmt.Errorf("ML-DSA-87 key data size is invalid: got %d bytes, expected %d", len(pk.KeyData), pqcrypto.MLDSA87PublicKeySize)
+		}
+	}
+
 	return nil
 }

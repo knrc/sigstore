@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 
 	"github.com/sigstore/sigstore/pkg/cryptoutils"
+	"github.com/sigstore/sigstore/pkg/pqcrypto"
 	"github.com/sigstore/sigstore/pkg/signature/options"
 )
 
@@ -69,6 +70,11 @@ func LoadVerifierWithOpts(publicKey crypto.PublicKey, opts ...LoadOption) (Verif
 			return LoadED25519phVerifier(pk)
 		}
 		return LoadED25519Verifier(pk)
+	case *pqcrypto.PQPublicKey:
+		if isPQPublicKeySupported(pk) {
+			return LoadPQVerifier(pk)
+		}
+		return nil, pqcrypto.ErrMissingPostQuantumBuildTag
 	}
 	return nil, errors.New("unsupported public key type")
 }

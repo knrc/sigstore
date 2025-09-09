@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 
 	"github.com/sigstore/sigstore/pkg/cryptoutils"
+	"github.com/sigstore/sigstore/pkg/pqcrypto"
 	"github.com/sigstore/sigstore/pkg/signature/options"
 )
 
@@ -68,8 +69,13 @@ func LoadSignerVerifierWithOpts(privateKey crypto.PrivateKey, opts ...LoadOption
 			return LoadED25519phSignerVerifier(pk)
 		}
 		return LoadED25519SignerVerifier(pk)
+	case *pqcrypto.PQPrivateKey:
+		if isPQPrivateKeySupported(pk) {
+			return LoadPQSignerVerifier(pk.PublicKey, pk)
+		}
+		return nil, pqcrypto.ErrMissingPostQuantumBuildTag
 	}
-	return nil, errors.New("unsupported public key type")
+	return nil, errors.New("unsupported private key type")
 }
 
 // LoadSignerVerifierFromPEMFile returns a signature.SignerVerifier based on the algorithm of the private key
